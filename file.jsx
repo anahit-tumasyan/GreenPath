@@ -122,10 +122,10 @@ const CHARACTERS = [
 const MODULES = [
   {
     id: 1,
-    title: "Forest-Inspired Edible Wildlife Gardens",
+    title: "Wildlife Gardens",
     icon: "🌍",
     color: "#f59e0b",
-    info: "Forest-inspired edible wildlife gardens are natural or semi-natural spaces where edible plants grow in harmony with local ecosystems, mimicking the layers and biodiversity of a forest with minimal human intervention. Traditional seeds are the hidden power behind these gardens saving, exchanging, and growing diverse local varieties preserves cultural heritage and strengthens climate resilience for generations to come."
+    info: "Wildlife gardens are natural or semi-natural spaces where edible plants grow in harmony with local ecosystems, mimicking the layers and biodiversity of a forest with minimal human intervention. Traditional seeds are the hidden power behind these gardens saving, exchanging, and growing diverse local varieties preserves cultural heritage and strengthens climate resilience for generations to come."
   },
   {
     id: 2,
