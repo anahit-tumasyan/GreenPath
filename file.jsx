@@ -1,4 +1,13 @@
 import React, { useMemo, useState, useEffect, useRef } from "react";
+import { auth, db } from "./firebase.js";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  updateProfile,
+  onAuthStateChanged,
+  signOut,
+} from "firebase/auth";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 
 /* ═══════════════════════════════════════════════════
    ASSET PATH HELPER
@@ -15,38 +24,73 @@ const ASSET_BASE = (() => {
 function asset(name) { return ASSET_BASE + name; }
 
 /* ═══════════════════════════════════════════════════
-   LOCAL "ACCOUNTS" (browser-only, not a real backend)
+   RESPONSIVE HELPER
+   Tracks viewport width so layouts can adapt between
+   narrow phone screens and wider tablet/desktop screens.
 ═══════════════════════════════════════════════════ */
-const USERS_KEY = "gq_users";
-const CURRENT_USER_KEY = "gq_current_user";
+const MOBILE_BREAKPOINT = 640;
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(
+    typeof window !== "undefined" ? window.innerWidth <= MOBILE_BREAKPOINT : false
+  );
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= MOBILE_BREAKPOINT);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return isMobile;
+}
 
-function loadUsers() {
-  try { return JSON.parse(localStorage.getItem(USERS_KEY)) || {}; }
-  catch { return {}; }
+/* ═══════════════════════════════════════════════════
+   ACCOUNTS — Firebase Auth + Firestore, so a username is
+   unique across every device, not just one browser. Auth
+   needs an email, so usernames are mapped to a fake
+   "@gardenquest.local" address under the hood; the UI
+   only ever shows the username.
+═══════════════════════════════════════════════════ */
+const USERNAME_RE = /^[a-z0-9_.-]{3,20}$/;
+function usernameToEmail(username) { return `${username}@gardenquest.local`; }
+
+function friendlyAuthError(err) {
+  switch (err?.code) {
+    case "auth/email-already-in-use": return "That username is already taken.";
+    case "auth/invalid-credential":
+    case "auth/wrong-password":
+    case "auth/user-not-found": return "Incorrect username or password.";
+    case "auth/weak-password": return "Password must be at least 6 characters.";
+    case "auth/network-request-failed": return "No internet connection — please try again.";
+    default: return "Something went wrong. Please try again.";
+  }
 }
-function saveUsers(users) {
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
+
+async function registerUser(username, password, fullName) {
+  const cred = await createUserWithEmailAndPassword(auth, usernameToEmail(username), password);
+  await updateProfile(cred.user, { displayName: fullName });
+  await setDoc(doc(db, "users", cred.user.uid), { username, fullName, progress: null });
+  return { uid: cred.user.uid, username, fullName, progress: null };
 }
-function setStoredCurrentUser(username) {
-  localStorage.setItem(CURRENT_USER_KEY, username);
+
+async function loginUser(username, password) {
+  const cred = await signInWithEmailAndPassword(auth, usernameToEmail(username), password);
+  const record = await fetchUserRecord(cred.user.uid);
+  return {
+    uid: cred.user.uid,
+    username,
+    fullName: record?.fullName || cred.user.displayName || username,
+    progress: record?.progress || null,
+  };
 }
-function getStoredCurrentUser() {
-  const username = localStorage.getItem(CURRENT_USER_KEY);
-  if (!username) return null;
-  const users = loadUsers();
-  const u = users[username];
-  return u ? { username, fullName: u.fullName } : null;
+
+async function fetchUserRecord(uid) {
+  const snap = await getDoc(doc(db, "users", uid));
+  return snap.exists() ? snap.data() : null;
 }
-function loadProgress(username) {
-  const users = loadUsers();
-  return users[username]?.progress || null;
+
+async function saveProgress(uid, progress) {
+  await setDoc(doc(db, "users", uid), { progress }, { merge: true });
 }
-function saveProgress(username, progress) {
-  const users = loadUsers();
-  if (!users[username]) return;
-  users[username].progress = progress;
-  saveUsers(users);
-}
+
+function logoutUser() { return signOut(auth); }
 
 /* ═══════════════════════════════════════════════════
    DATA
@@ -103,6 +147,35 @@ const MODULES = [
     icon: "🌱",
     color: "#10b981",
     info: "Clay pot crafting revives the ancient art of shaping terracotta vessels for food storage durable, breathable containers for grains, legumes and pickles that keep food fresh for longer without a single scrap of plastic. Old clothes and linen scraps get a second life too, stitched into sturdy reusable bags for shopping, produce and bread reviving traditional sewing skills while replacing single-use plastic."
+  },
+  // NEW — placeholder modules, questions to be refined later
+  {
+    id: 5,
+    title: "Composting & Soil Health",
+    icon: "🍂",
+    color: "#8b5cf6",
+    info: "Composting turns kitchen scraps and garden waste into rich, dark soil food instead of landfill methane. Layering nitrogen-rich \"greens\" like vegetable peels with carbon-rich \"browns\" like dry leaves feeds the microbes that build healthy, fertile soil and reduce the need for chemical fertilisers."
+  },
+  {
+    id: 6,
+    title: "Water-Wise Gardening",
+    icon: "💧",
+    color: "#06b6d4",
+    info: "Small habits like watering in the cool of morning or evening, mulching around plants, and collecting rainwater in a barrel can dramatically cut how much water a garden needs. These traditional water-wise techniques help gardens stay resilient through dry spells and droughts."
+  },
+  {
+    id: 7,
+    title: "Native Pollinators & Wildflowers",
+    icon: "🐝",
+    color: "#eab308",
+    info: "Bees, butterflies and other pollinators rely on native wildflowers they've adapted to over generations. Planting a mix of flowers that bloom at different times throughout the season gives pollinators a steady food source and helps them thrive alongside our gardens."
+  },
+  {
+    id: 8,
+    title: "Seasonal & Local Eating",
+    icon: "🥕",
+    color: "#ec4899",
+    info: "Eating fruits and vegetables when they're in season and grown nearby means less transport, less energy-intensive storage, and produce that's fresher and tastier. Choosing seasonal, local food is one of the simplest everyday ways to shrink a household's carbon footprint."
   }
 ];
 
@@ -156,7 +229,7 @@ const QUESTIONS = [
     text: "Which choice helps reduce food transport emissions?",
     options: ["Imported packaged food", "Food grown in a local edible whildlife garden"],
     images: [asset("Garden1.png"), asset("Garden2.png")],
-    answer: 0,
+    answer: 1,
     explanation: "A diverse garden provides a wide variety of food and seeds while preserving biodiversity, supporting pollinators and wildlife, and helping gardens better adapt to drought, pests, and climate change."
   },
   {
@@ -244,15 +317,123 @@ const QUESTIONS = [
     answer: 1,
     explanation: "Stitching reusable bags turns worn clothes, linen scraps and leftover textiles into sturdy bags for shopping, produce and bread. This simple upcycling craft revives traditional sewing skills and replaces single-use plastic bags with washable, long-lasting cloth."
   },
+
+  // NEW — placeholder questions, to be refined later
+  // MODULE 5: Composting & Soil Health
+  {
+    id: 17,
+    module: 5,
+    text: "What is compost mainly made from?",
+    options: ["Kitchen scraps and garden waste", "Plastic and metal", "Only chemical fertiliser", "Sand and gravel"],
+    answer: 0,
+    explanation: "Composting turns everyday food scraps and yard waste into rich, fertile soil, keeping them out of landfill where they'd otherwise produce methane."
+  },
+  {
+    id: 18,
+    module: 5,
+    text: "Is it TRUE OR FALSE that a healthy compost pile needs both nitrogen-rich \"greens\" and carbon-rich \"browns\"?",
+    options: ["True", "False"],
+    answer: 0,
+    explanation: "Balancing nitrogen-rich greens (like vegetable peels) with carbon-rich browns (like dry leaves) feeds the microbes that break material down into healthy soil."
+  },
+  {
+    id: 19,
+    module: 5,
+    text: "Which of these should NOT go into a home compost bin?",
+    options: ["Vegetable peels", "Coffee grounds", "Meat and dairy", "Dry leaves"],
+    answer: 2,
+    explanation: "Meat and dairy attract pests and break down poorly in a home compost pile, so traditional composting sticks to plant-based scraps and yard waste."
+  },
+
+  // MODULE 6: Water-Wise Gardening
+  {
+    id: 20,
+    module: 6,
+    text: "Which watering time helps plants absorb water best and reduces evaporation?",
+    options: ["Midday", "Early morning or evening", "Right after rain", "Only at night"],
+    answer: 1,
+    explanation: "Watering in the cool of morning or evening means less moisture is lost to evaporation from the midday sun, so more of it reaches the roots."
+  },
+  {
+    id: 21,
+    module: 6,
+    text: "Is it TRUE OR FALSE that mulching around plants helps the soil retain moisture?",
+    options: ["True", "False"],
+    answer: 0,
+    explanation: "A layer of mulch shields soil from the sun and slows evaporation, keeping the ground moist for longer between waterings."
+  },
+  {
+    id: 22,
+    module: 6,
+    text: "What is a simple way to reuse water at home for the garden?",
+    options: ["Collecting rainwater in a barrel", "Running the tap constantly", "Using bottled water only", "Watering with soda"],
+    answer: 0,
+    explanation: "A rain barrel captures free rainwater from the roof, cutting down on tap water use and giving plants water naturally free of chlorine."
+  },
+
+  // MODULE 7: Native Pollinators & Wildflowers
+  {
+    id: 23,
+    module: 7,
+    text: "Why are native wildflowers important for local pollinators?",
+    options: ["They provide familiar food sources bees and butterflies have adapted to", "They repel all insects", "They only grow in greenhouses", "They require pesticides to survive"],
+    answer: 0,
+    explanation: "Local bees and butterflies have evolved alongside native wildflowers, so these plants are the food sources pollinators recognise and rely on most."
+  },
+  {
+    id: 24,
+    module: 7,
+    text: "Is it TRUE OR FALSE that planting flowers that bloom at different times helps pollinators all season long?",
+    options: ["True", "False"],
+    answer: 0,
+    explanation: "Staggering bloom times means there's always something flowering, giving pollinators a steady source of nectar and pollen from spring through autumn."
+  },
+  {
+    id: 25,
+    module: 7,
+    text: "Which of these is a pollinator?",
+    options: ["Bee", "Earthworm", "Snail", "Mole"],
+    answer: 0,
+    explanation: "Bees carry pollen from flower to flower as they feed, making them one of the most important pollinators for gardens and food crops alike."
+  },
+
+  // MODULE 8: Seasonal & Local Eating
+  {
+    id: 26,
+    module: 8,
+    text: "What is a key benefit of eating fruits and vegetables that are in season and grown locally?",
+    options: ["They usually taste better and need less transport", "They are always more expensive", "They must be imported from far away", "They have no nutritional value"],
+    answer: 0,
+    explanation: "Local, in-season produce travels a shorter distance and is often picked closer to ripeness, meaning fresher flavour and a smaller transport footprint."
+  },
+  {
+    id: 27,
+    module: 8,
+    text: "Is it TRUE OR FALSE that a seasonal, local diet generally has a lower carbon footprint than one based on imported, out-of-season produce?",
+    options: ["True", "False"],
+    answer: 0,
+    explanation: "Imported, out-of-season produce often needs energy-intensive transport, cold storage or greenhouse heating, all of which add to its carbon footprint."
+  },
+  {
+    id: 28,
+    module: 8,
+    text: "Which is an example of eating seasonally in most temperate climates?",
+    options: ["Eating strawberries grown locally in summer", "Demanding fresh strawberries flown in during winter", "Eating only canned food year-round", "Avoiding fruits and vegetables entirely"],
+    answer: 0,
+    explanation: "Enjoying strawberries when they naturally ripen locally in summer avoids the emissions and cost of flying out-of-season fruit in from afar."
+  },
 ];
 
 const PATH_NODES = [
   { x:50, y:90 }, // 0 = START
-  { x:25, y:74 }, // 1
-  { x:65, y:58 }, // 2
-  { x:28, y:42 }, // 3
-  { x:68, y:26 }, // 4
-  { x:44, y:11 }, // 5 FINISH
+  { x:18, y:82 }, // 1
+  { x:72, y:74 }, // 2
+  { x:24, y:66 }, // 3
+  { x:70, y:58 }, // 4
+  { x:24, y:50 }, // 5
+  { x:68, y:42 }, // 6
+  { x:26, y:34 }, // 7
+  { x:60, y:26 }, // 8 = last module = FINISH
 ];
 
 function lerp(a,b,t){ return a+(b-a)*t; }
@@ -497,11 +678,11 @@ function AuthScreen({ onAuth }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault();
     setError("");
-    const users = loadUsers();
     const uname = username.trim().toLowerCase();
 
     if (mode === "register") {
@@ -509,22 +690,37 @@ function AuthScreen({ onAuth }) {
         setError("Please fill in all fields.");
         return;
       }
-      if (users[uname]) {
-        setError("That username is already taken.");
+      if (!USERNAME_RE.test(uname)) {
+        setError("Username must be 3-20 characters: letters, numbers, dots, hyphens or underscores.");
         return;
       }
-      users[uname] = { fullName: fullName.trim(), password, progress: null };
-      saveUsers(users);
-      setStoredCurrentUser(uname);
-      onAuth({ username: uname, fullName: fullName.trim(), progress: null });
+      if (password.length < 6) {
+        setError("Password must be at least 6 characters.");
+        return;
+      }
+      setBusy(true);
+      try {
+        const u = await registerUser(uname, password, fullName.trim());
+        onAuth(u);
+      } catch (err) {
+        setError(friendlyAuthError(err));
+      } finally {
+        setBusy(false);
+      }
     } else {
-      const u = users[uname];
-      if (!u || u.password !== password) {
-        setError("Incorrect username or password.");
+      if (!uname || !password) {
+        setError("Please fill in all fields.");
         return;
       }
-      setStoredCurrentUser(uname);
-      onAuth({ username: uname, fullName: u.fullName, progress: u.progress || null });
+      setBusy(true);
+      try {
+        const u = await loginUser(uname, password);
+        onAuth(u);
+      } catch (err) {
+        setError(friendlyAuthError(err));
+      } finally {
+        setBusy(false);
+      }
     }
   }
 
@@ -566,8 +762,8 @@ function AuthScreen({ onAuth }) {
             <div style={{ color:"#fca5a5", fontSize:13, textAlign:"center" }}>{error}</div>
           )}
 
-          <Btn onClick={()=>{}} style={{ width:"100%", marginTop:6 }} color="#22c55e">
-            {mode==="register" ? "Create Account 🌱" : "Log In 🌿"}
+          <Btn onClick={()=>{}} disabled={busy} style={{ width:"100%", marginTop:6 }} color="#22c55e">
+            {busy ? "Please wait…" : mode==="register" ? "Create Account 🌱" : "Log In 🌿"}
           </Btn>
         </form>
 
@@ -582,8 +778,7 @@ function AuthScreen({ onAuth }) {
         </div>
 
         <p style={{ marginTop:18, color:"#475569", fontSize:11, textAlign:"center", lineHeight:1.5 }}>
-          Your account is stored only on this device/browser. It's used to personalize your
-          completion certificate — it isn't a secure login system.
+          Your account works on any device — just log in with the same username and password.
         </p>
       </Panel>
     </GardenWrap>
@@ -739,7 +934,7 @@ function LanguageScreen({ onSelect }) {
           <h1 style={{ fontSize:22, fontWeight:900, marginBottom:4, color:"#f0fdf4" }}>
             Choose Your Language
           </h1>
-          <p style={{ color:"#86efac", fontSize:13 }}>Pick the language you want to learn about</p>
+          <p style={{ color:"#86efac", fontSize:13 }}>Select a language to continue</p>
         </div>
         <div style={{ display:"flex", flexDirection:"column", gap:11 }}>
           {LANGUAGES.map(lang=>(
@@ -1162,29 +1357,32 @@ function MapSVG({ completedModules }) {
 
       {/* ─── DIRT PATH ─── */}
       {/* Shadow */}
-      <path d="M50 92 Q36 85 25 76 Q42 65 65 60 Q44 50 28 44 Q48 33 68 28 Q54 18 44 13"
+      <path d="M50 90 Q34 86 18 82 Q46 78 72 74 Q50 70 24 66 Q48 62 70 58 Q48 54 24 50 Q48 46 68 42 Q48 38 26 34 Q44 30 60 26"
         stroke="#3a2010" strokeWidth="5" fill="none" strokeLinecap="round" opacity="0.3"
         transform="translate(0.6,0.6)"/>
       {/* Main path */}
-      <path d="M50 92 Q36 85 25 76 Q42 65 65 60 Q44 50 28 44 Q48 33 68 28 Q54 18 44 13"
+      <path d="M50 90 Q34 86 18 82 Q46 78 72 74 Q50 70 24 66 Q48 62 70 58 Q48 54 24 50 Q48 46 68 42 Q48 38 26 34 Q44 30 60 26"
         stroke="#c8a96e" strokeWidth="4" fill="none" strokeLinecap="round" opacity="0.75"/>
       {/* Path highlight */}
-      <path d="M50 92 Q36 85 25 76 Q42 65 65 60 Q44 50 28 44 Q48 33 68 28 Q54 18 44 13"
+      <path d="M50 90 Q34 86 18 82 Q46 78 72 74 Q50 70 24 66 Q48 62 70 58 Q48 54 24 50 Q48 46 68 42 Q48 38 26 34 Q44 30 60 26"
         stroke="white" strokeWidth="0.7" fill="none" strokeLinecap="round" opacity="0.25"
         strokeDasharray="2,4"/>
       {/* Path stones */}
-      {[[50,92],[40,88],[30,82],[25,76],[35,70],[46,65],[58,62],[65,60],[55,55],[42,50],[32,46],
-        [28,44],[38,40],[48,36],[58,32],[68,28],[60,22],[52,17],[44,13]].map(([x,y],i)=>(
+      {[[50,90],[34,86],[18,82],[45,78],[72,74],[48,70],[24,66],[47,62],[70,58],[47,54],
+        [24,50],[46,46],[68,42],[47,38],[26,34],[43,30],[60,26]].map(([x,y],i)=>(
         <ellipse key={i} cx={x} cy={y} rx="1.2" ry="0.7" fill="#e5d5b0" opacity="0.3"
           transform={`rotate(${i*25} ${x} ${y})`}/>
       ))}
 
       {/* Completed path glow */}
-      {completedModules>=1&&<path d="M50 92 Q36 85 25 76" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
-      {completedModules>=2&&<path d="M25 76 Q42 65 65 60" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
-      {completedModules>=3&&<path d="M65 60 Q44 50 28 44" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
-      {completedModules>=4&&<path d="M28 44 Q48 33 68 28" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
-      {completedModules>=5&&<path d="M68 28 Q54 18 44 13" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
+      {completedModules>=1&&<path d="M50 90 Q34 86 18 82" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
+      {completedModules>=2&&<path d="M18 82 Q46 78 72 74" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
+      {completedModules>=3&&<path d="M72 74 Q50 70 24 66" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
+      {completedModules>=4&&<path d="M24 66 Q48 62 70 58" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
+      {completedModules>=5&&<path d="M70 58 Q48 54 24 50" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
+      {completedModules>=6&&<path d="M24 50 Q48 46 68 42" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
+      {completedModules>=7&&<path d="M68 42 Q48 38 26 34" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
+      {completedModules>=8&&<path d="M26 34 Q44 30 60 26" stroke="#4ade80" strokeWidth="3.8" fill="none" strokeLinecap="round" opacity="0.9"/>}
 
       {/* Aristotle person near start */}
       <image href={asset("Aristotle.png")} x="55" y="81" width="11" height="15"
@@ -1196,7 +1394,7 @@ function MapSVG({ completedModules }) {
 /* ═══════════════════════════════════════════════════
    MAP SCREEN
 ═══════════════════════════════════════════════════ */
-function MapScreen({ language, character, completedModules, prevCompleted, onStartModule, onBack, onViewCertificate, onPlayAgain }) {
+function MapScreen({ language, character, completedModules, prevCompleted, onStartModule, onBack, onViewCertificate, onPlayAgain, onLogout }) {
   const [charNode,        setCharNode]        = useState(prevCompleted);
   const [charPos,         setCharPos]         = useState(PATH_NODES[prevCompleted]);
   const [isWalking,       setIsWalking]       = useState(false);
@@ -1314,7 +1512,13 @@ function MapScreen({ language, character, completedModules, prevCompleted, onSta
       <Panel style={{ padding:0, overflow:"hidden" }}>
         {/* Header */}
         <div style={{ padding:"16px 20px 12px", borderBottom:"1px solid rgba(74,222,128,0.12)" }}>
-          <BackBtn onClick={onBack}/>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <BackBtn onClick={onBack}/>
+            <button onClick={onLogout} style={{
+              background:"none", border:"none", color:"#f87171", fontSize:12,
+              cursor:"pointer", textDecoration:"underline", fontFamily:"inherit", marginBottom:16,
+            }}>Log out</button>
+          </div>
           <div style={{ display:"flex", alignItems:"center", gap:12 }}>
             <img src={character.idle} alt={character.name}
               style={{ width:42, height:56, objectFit:"contain", flexShrink:0 }}/>
@@ -1485,6 +1689,7 @@ function MapNode({ mod, node, done, current, locked, onClick }) {
    GAME SCREEN — cinematic encounter + quiz
 ═══════════════════════════════════════════════════ */
 function GameScreen({ mod, character, questions, onFinish }) {
+  const isMobile = useIsMobile();
   const [phase,     setPhase]     = useState("encounter");
   const [idx,       setIdx]       = useState(0);
   const [selected,  setSelected]  = useState(null);
@@ -1958,28 +2163,35 @@ function handleNext() {
 
 {/* ═══ QUESTION PHASE ═══ */}
       {phase==="question"&&(
-        <div style={{ position:"absolute",inset:0,display:"flex",alignItems:"stretch",
-          zIndex:10,padding:"50px 12px 16px" }}>
+        <div style={{ position:"absolute",inset:0,display:"flex",
+          flexDirection:isMobile?"column":"row",alignItems:"stretch",
+          zIndex:10,padding:isMobile?"46px 10px 10px":"50px 12px 16px",gap:isMobile?8:0 }}>
           {/* Left: Character */}
-          <div style={{ width:"28%",display:"flex",flexDirection:"column",
-            alignItems:"center",justifyContent:"flex-end",paddingBottom:12,
+          <div style={{ width:isMobile?"100%":"28%",display:"flex",
+            flexDirection:isMobile?"row":"column",flexShrink:0,
+            alignItems:"center",justifyContent:isMobile?"flex-start":"flex-end",
+            gap:isMobile?10:0,paddingBottom:isMobile?0:12,
             animation:"slideInLeft 0.4s ease" }}>
             <img src={charImg} alt={character.name} style={{
-              width:80,height:107,objectFit:"contain",
+              width:isMobile?54:80,height:isMobile?72:107,objectFit:"contain",flexShrink:0,
               filter:`drop-shadow(0 6px 18px ${character.color}99)`,
               animation:"idleFloat 3s ease-in-out infinite",
             }}/>
-            <div style={{ color:character.color,fontWeight:900,fontSize:11,
-              background:"rgba(0,0,0,0.5)",borderRadius:8,padding:"3px 10px",
-              marginTop:5,textAlign:"center" }}>{character.name}</div>
-            <div style={{ color:"#94a3b8",fontSize:10,textAlign:"center",
-              marginTop:6,fontStyle:"italic",padding:"0 4px",lineHeight:1.4 }}>
-              "{character.bubble.idle}"
+            <div style={{ display:"flex",flexDirection:"column",
+              alignItems:isMobile?"flex-start":"center" }}>
+              <div style={{ color:character.color,fontWeight:900,fontSize:11,
+                background:"rgba(0,0,0,0.5)",borderRadius:8,padding:"3px 10px",
+                marginTop:isMobile?0:5,textAlign:isMobile?"left":"center" }}>{character.name}</div>
+              <div style={{ color:"#94a3b8",fontSize:10,textAlign:isMobile?"left":"center",
+                marginTop:6,fontStyle:"italic",padding:"0 4px",lineHeight:1.4,
+                maxWidth:isMobile?180:undefined }}>
+                "{character.bubble.idle}"
+              </div>
             </div>
           </div>
 
           {/* Right: Q+A panel */}
-          <div style={{ flex:1,display:"flex",flexDirection:"column",gap:8,
+          <div style={{ flex:1,minWidth:0,display:"flex",flexDirection:"column",gap:8,
             animation:"slideInRight 0.4s ease" }}>
             <div style={{ background:"rgba(10,20,10,0.82)",backdropFilter:"blur(16px)",
               border:"1px solid rgba(74,222,128,0.22)",borderRadius:18,padding:"12px 14px" }}>
@@ -2000,13 +2212,18 @@ function handleNext() {
             </div>
 
             {q.images ? (
-              <div style={{ display:"grid",gridTemplateColumns:`repeat(${q.images.length}, 1fr)`,gap:8,
-                flex:1,alignContent:"center",maxHeight:"100%",overflow:"hidden" }}>
+              <div style={{ display:"grid",
+                gridTemplateColumns:isMobile
+                  ?`repeat(${Math.min(q.images.length,2)}, minmax(0,1fr))`
+                  :`repeat(${q.images.length}, 1fr)`,
+                gap:isMobile?10:8,
+                flex:1,alignContent:"center",maxHeight:"100%",overflow:isMobile?"auto":"hidden" }}>
                 {q.images.map((img,i)=>(
                   <div key={i} onClick={()=>handleAnswer(i)}
                     style={{ borderRadius:14,overflow:"hidden",cursor:"pointer",
                       border:"1.5px solid rgba(74,222,128,0.18)",transition:"all 0.15s",
-                      background:"rgba(10,25,10,0.4)",aspectRatio:"4 / 3",height:"min(22vh,150px)" }}
+                      background:"rgba(10,25,10,0.4)",aspectRatio:"4 / 3",
+                      height:isMobile?"auto":"min(22vh,150px)" }}
                     onMouseEnter={e=>{ e.currentTarget.style.transform="scale(1.03)"; e.currentTarget.style.borderColor="#22c55e88"; }}
                     onMouseLeave={e=>{ e.currentTarget.style.transform="scale(1)"; e.currentTarget.style.borderColor="rgba(74,222,128,0.18)"; }}
                   >
@@ -2044,35 +2261,43 @@ function handleNext() {
 
       {/* ═══ FEEDBACK PHASE ═══ */}
       {phase==="feedback"&&(
-        <div style={{ position:"absolute",inset:0,display:"flex",alignItems:"stretch",
-          zIndex:10,padding:"50px 12px 16px" }}>
+        <div style={{ position:"absolute",inset:0,display:"flex",
+          flexDirection:isMobile?"column":"row",alignItems:"stretch",
+          zIndex:10,padding:isMobile?"46px 10px 10px":"50px 12px 16px",gap:isMobile?8:0 }}>
           {/* Left: Character reacting */}
-          <div style={{ width:"28%",display:"flex",flexDirection:"column",
-            alignItems:"center",justifyContent:"flex-end",paddingBottom:12,
+          <div style={{ width:isMobile?"100%":"28%",display:"flex",
+            flexDirection:isMobile?"row":"column",flexShrink:0,
+            alignItems:"center",justifyContent:isMobile?"flex-start":"flex-end",
+            gap:isMobile?10:0,paddingBottom:isMobile?0:12,
             position:"relative" }}>
             {showPocket&&(
             <div style={{
-            position:"absolute", bottom:"28%", left:"55%",
+            position:"absolute", bottom:isMobile?"auto":"28%", top:isMobile?"-4px":"auto",
+            left:isMobile?"46px":"55%",
             zIndex:25, pointerEvents:"none",
             animation:"pocketGlow 1s ease forwards",
             }}><CoinIcon size={24}/></div>
             )}
             <img key={animKey} src={charImg} alt={character.name} style={{
-              width:82,height:110,objectFit:"contain",
+              width:isMobile?56:82,height:isMobile?75:110,objectFit:"contain",flexShrink:0,
               filter:`drop-shadow(0 6px 18px ${character.color}bb)`,
               animation:correct?"cBounce 0.65s ease":"cShake 0.5s ease",
             }}/>
-            <div style={{ color:character.color,fontWeight:900,fontSize:11,
-              background:"rgba(0,0,0,0.5)",borderRadius:8,padding:"3px 10px",
-              marginTop:5,textAlign:"center" }}>{character.name}</div>
-            <div style={{ color:correct?"#86efac":"#fca5a5",fontSize:10,textAlign:"center",
-              marginTop:6,fontStyle:"italic",padding:"0 4px",lineHeight:1.4 }}>
-              "{correct?character.bubble.happy:character.bubble.sad}"
+            <div style={{ display:"flex",flexDirection:"column",
+              alignItems:isMobile?"flex-start":"center" }}>
+              <div style={{ color:character.color,fontWeight:900,fontSize:11,
+                background:"rgba(0,0,0,0.5)",borderRadius:8,padding:"3px 10px",
+                marginTop:isMobile?0:5,textAlign:isMobile?"left":"center" }}>{character.name}</div>
+              <div style={{ color:correct?"#86efac":"#fca5a5",fontSize:10,textAlign:isMobile?"left":"center",
+                marginTop:6,fontStyle:"italic",padding:"0 4px",lineHeight:1.4,
+                maxWidth:isMobile?180:undefined }}>
+                "{correct?character.bubble.happy:character.bubble.sad}"
+              </div>
             </div>
           </div>
 
           {/* Right: Aristotle reaction + revealed answers */}
-<div style={{ flex:1,display:"flex",flexDirection:"column",gap:8 }}>
+<div style={{ flex:1,minWidth:0,display:"flex",flexDirection:"column",gap:8 }}>
             <div style={{
               background:correct?"rgba(22,101,52,0.72)":"rgba(127,29,29,0.72)",
               backdropFilter:"blur(16px)",
@@ -2113,14 +2338,18 @@ function handleNext() {
             </div>
 
             {q.images ? (
-              <div style={{ display:"grid",gridTemplateColumns:`repeat(${q.images.length}, 1fr)`,gap:8 }}>
+              <div style={{ display:"grid",
+                gridTemplateColumns:isMobile
+                  ?`repeat(${Math.min(q.images.length,2)}, minmax(0,1fr))`
+                  :`repeat(${q.images.length}, 1fr)`,
+                gap:isMobile?10:8 }}>
                 {q.images.map((img,i)=>{
                   let border="2px solid transparent";
                   if (i===q.answer)      border="2px solid #22c55e";
                   else if (i===selected) border="2px solid #ef4444";
                   return (
                     <div key={i} style={{ position:"relative",borderRadius:14,overflow:"hidden",
-                      border,aspectRatio:"4 / 3",height:"min(18vh,120px)" }}>
+                      border,aspectRatio:"4 / 3",height:isMobile?"auto":"min(18vh,120px)" }}>
                       <img src={img} alt={q.options[i]} style={{
                         width:"100%",height:"100%",objectFit:"cover",display:"block",
                         opacity:(i===q.answer||i===selected)?1:0.5 }}/>
@@ -2175,7 +2404,7 @@ function handleNext() {
 ═══════════════════════════════════════════════════ */
 function ResultsScreen({ mod, character, score, total, onContinue }) {
   const pass  = score >= total - 1;
-  const stars = score===total?3:score>=total-1?2:score>=total-3?1:0;
+  const stars = score===total?3:pass?2:score>0?1:0;
 
   return (
     <GardenWrap>
@@ -2253,61 +2482,175 @@ function CertificateScreen({ user, language, onBack }) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-    const W = 1200, H = 850;
-    canvas.width = W; canvas.height = H;
+    const W = 1200, H = 850, cx = W/2;
+    const SCALE = 2; // render at 2x for a crisp download
+    canvas.width = W*SCALE; canvas.height = H*SCALE;
+    ctx.scale(SCALE, SCALE);
 
+    const GREEN = "#166534", GREEN_LIGHT = "#4ade80";
+    const GOLD = "#c9a227", GOLD_LIGHT = "#f4d160", GOLD_DARK = "#8a6d1a";
+    const INK = "#1f2937", GRAY = "#57606f";
+
+    // Arcs text along a circle, centred on the current (translated) origin.
+    function arcText(text, radius, font, color, stepDeg) {
+      ctx.save();
+      ctx.font = font; ctx.fillStyle = color;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const step = stepDeg*Math.PI/180;
+      ctx.rotate(-step*(text.length-1)/2);
+      for (let i=0;i<text.length;i++) {
+        ctx.save(); ctx.translate(0,-radius); ctx.fillText(text[i],0,0); ctx.restore();
+        ctx.rotate(step);
+      }
+      ctx.restore();
+    }
+    function ribbonTail(x, y, angleDeg, color) {
+      ctx.save();
+      ctx.translate(x,y); ctx.rotate(angleDeg*Math.PI/180);
+      const w=28, len=92, notch=22;
+      ctx.beginPath();
+      ctx.moveTo(-w/2,0); ctx.lineTo(w/2,0); ctx.lineTo(w/2,len);
+      ctx.lineTo(0,len-notch); ctx.lineTo(-w/2,len); ctx.closePath();
+      ctx.fillStyle = color; ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.18)"; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,0.16)";
+      ctx.fillRect(-4,4,8,len-notch-8);
+      ctx.restore();
+    }
+    function laurelSprig(x, y, mirror) {
+      ctx.save();
+      ctx.translate(x,y); ctx.scale(mirror,1);
+      for (let i=0;i<6;i++) {
+        const t = i/5;
+        ctx.save();
+        ctx.translate(8+t*44, -t*66);
+        ctx.rotate(-0.85+t*0.45);
+        ctx.beginPath(); ctx.ellipse(0,0,9,4,0,0,Math.PI*2);
+        ctx.fillStyle = i%2===0?GREEN_LIGHT:GREEN;
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+    function cornerFlourish(x, y, rotDeg) {
+      ctx.save();
+      ctx.translate(x,y); ctx.rotate(rotDeg*Math.PI/180);
+      ctx.strokeStyle = GOLD; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0,30); ctx.quadraticCurveTo(0,0,30,0); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0,18); ctx.quadraticCurveTo(0,0,18,0); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0,0,3.2,0,Math.PI*2); ctx.fillStyle = GOLD; ctx.fill();
+      ctx.restore();
+    }
+    function divider(y, w) {
+      ctx.strokeStyle = GOLD; ctx.lineWidth = 1.3;
+      ctx.beginPath(); ctx.moveTo(cx-w/2,y); ctx.lineTo(cx-9,y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx+9,y); ctx.lineTo(cx+w/2,y); ctx.stroke();
+      ctx.save(); ctx.translate(cx,y); ctx.rotate(Math.PI/4);
+      ctx.fillStyle = GOLD; ctx.fillRect(-4,-4,8,8); ctx.restore();
+    }
+
+    /* ── Background ── */
     const grad = ctx.createLinearGradient(0,0,W,H);
     grad.addColorStop(0, "#fdfaf0");
-    grad.addColorStop(1, "#f3ecd8");
+    grad.addColorStop(1, "#f2ead4");
     ctx.fillStyle = grad;
     ctx.fillRect(0,0,W,H);
+    // faint diagonal paper texture
+    ctx.save();
+    ctx.globalAlpha = 0.03; ctx.strokeStyle = GREEN; ctx.lineWidth = 1;
+    for (let x=-H;x<W;x+=16) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x+H,H); ctx.stroke(); }
+    ctx.restore();
+    // soft vignette
+    const vg = ctx.createRadialGradient(cx,H/2,H*0.25,cx,H/2,H*0.75);
+    vg.addColorStop(0,"rgba(0,0,0,0)"); vg.addColorStop(1,"rgba(60,40,10,0.10)");
+    ctx.fillStyle = vg; ctx.fillRect(0,0,W,H);
 
-    ctx.strokeStyle = "#166534";
-    ctx.lineWidth = 10;
+    /* ── Borders ── */
+    ctx.strokeStyle = GREEN; ctx.lineWidth = 10;
     ctx.strokeRect(30,30,W-60,H-60);
-    ctx.strokeStyle = "#4ade80";
-    ctx.lineWidth = 3;
+    ctx.strokeStyle = GOLD; ctx.lineWidth = 3;
     ctx.strokeRect(48,48,W-96,H-96);
+    ctx.strokeStyle = "rgba(201,162,39,0.45)"; ctx.lineWidth = 1;
+    ctx.strokeRect(58,58,W-116,H-116);
+    [[60,60,0],[W-60,60,90],[W-60,H-60,180],[60,H-60,270]].forEach(([x,y,r])=>cornerFlourish(x,y,r));
 
     ctx.textAlign = "center";
-    ctx.fillStyle = "#166534";
-    ctx.font = "bold 26px Georgia";
-    ctx.fillText("🌿 GARDEN QUEST 🌿", W/2, 130);
 
-    ctx.fillStyle = "#0f172a";
-    ctx.font = "bold 48px Georgia";
-    ctx.fillText("Certificate of Completion", W/2, 200);
+    /* ── Logo ── */
+    ctx.fillStyle = GREEN; ctx.font = "700 24px Georgia";
+    ctx.fillText("🌿 GARDEN QUEST 🌿", cx, 96);
+    divider(114, 170);
 
-    ctx.font = "20px Georgia";
-    ctx.fillStyle = "#475569";
-    ctx.fillText("This certifies that", W/2, 270);
+    /* ── Title ── */
+    ctx.fillStyle = "rgba(15,23,42,0.12)"; ctx.font = "700 46px Georgia";
+    ctx.fillText("Certificate of Achievement", cx+2, 192);
+    ctx.fillStyle = INK;
+    ctx.fillText("Certificate of Achievement", cx, 190);
 
-    ctx.font = "italic bold 44px Georgia";
-    ctx.fillStyle = "#166534";
-    ctx.fillText(user.fullName, W/2, 340);
+    ctx.fillStyle = GRAY; ctx.font = "italic 20px Georgia";
+    ctx.fillText("This certifies that", cx, 236);
 
-    ctx.font = "20px Georgia";
-    ctx.fillStyle = "#475569";
-    ctx.fillText("has successfully completed all four modules of Garden Quest", W/2, 400);
-    ctx.fillText(`in ${language.label}`, W/2, 430);
+    /* ── Name ── */
+    ctx.fillStyle = GREEN; ctx.font = "italic 700 50px Georgia";
+    ctx.fillText(user.fullName, cx, 306);
+    const nameWidth = ctx.measureText(user.fullName).width;
+    divider(328, Math.min(Math.max(nameWidth+70,260),520));
+
+    /* ── Body ── */
+    ctx.fillStyle = GRAY; ctx.font = "21px Georgia";
+    ctx.fillText(`has successfully completed all ${MODULES.length} modules of Garden Quest`, cx, 374);
+    ctx.font = "italic 21px Georgia";
+    ctx.fillText(`in ${language.flag} ${language.label}`, cx, 402);
+
+    /* ── Module badges ── */
+    ctx.fillStyle = GOLD_DARK; ctx.font = "700 13px Georgia";
+    ctx.fillText("· MODULES COMPLETED ·", cx, 440);
+    const R = 19, GAP = 13;
+    const total = MODULES.length*(2*R) + (MODULES.length-1)*GAP;
+    const startX = cx - total/2 + R;
+    MODULES.forEach((m,i)=>{
+      const x = startX + i*(2*R+GAP), y = 472;
+      ctx.beginPath(); ctx.arc(x,y,R,0,Math.PI*2);
+      ctx.fillStyle = `${m.color}22`; ctx.fill();
+      ctx.strokeStyle = m.color; ctx.lineWidth = 1.6; ctx.stroke();
+      ctx.font = "16px sans-serif"; ctx.fillStyle = INK;
+      ctx.fillText(m.icon, x, y+1);
+    });
+
+    /* ── Seal ── */
+    const sealY = 588, sealR = 52;
+    ribbonTail(cx-13, sealY, -9, GREEN);
+    ribbonTail(cx+13, sealY, 9, "#15803d");
+    laurelSprig(cx-sealR-4, sealY+30, -1);
+    laurelSprig(cx+sealR+4, sealY+30, 1);
+
+    const sealGrad = ctx.createRadialGradient(cx-15,sealY-15,4,cx,sealY,sealR);
+    sealGrad.addColorStop(0, GOLD_LIGHT); sealGrad.addColorStop(0.55, GOLD); sealGrad.addColorStop(1, GOLD_DARK);
+    ctx.beginPath(); ctx.arc(cx,sealY,sealR,0,Math.PI*2);
+    ctx.fillStyle = sealGrad; ctx.fill();
+    ctx.strokeStyle = GOLD_DARK; ctx.lineWidth = 3; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx,sealY,sealR-8,0,Math.PI*2);
+    ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 1.2; ctx.stroke();
+
+    ctx.save(); ctx.translate(cx,sealY);
+    arcText("★ GARDEN QUEST ★", sealR-14, "700 11px Georgia", "#5c3d0a", 15);
+    ctx.restore();
+    ctx.font = "26px sans-serif"; ctx.fillStyle = "#5c3d0a";
+    ctx.fillText("🏆", cx, sealY+16);
+
+    /* ── Footer ── */
+    ctx.strokeStyle = "rgba(201,162,39,0.4)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(90,732); ctx.lineTo(W-90,732); ctx.stroke();
 
     const dateStr = new Date().toLocaleDateString(undefined, {
-      year: "numeric", month: "long", day: "numeric"
+      year:"numeric", month:"long", day:"numeric"
     });
-    ctx.font = "16px Georgia";
-    ctx.fillText(`Awarded on ${dateStr}`, W/2, 500);
-
-    ctx.beginPath();
-    ctx.arc(W/2, 600, 55, 0, Math.PI*2);
-    ctx.fillStyle = "#fbbf24";
-    ctx.fill();
-    ctx.strokeStyle = "#b8720a";
-    ctx.lineWidth = 4;
-    ctx.stroke();
-    ctx.fillStyle = "#78350f";
-    ctx.font = "bold 14px Georgia";
-    ctx.fillText("GARDEN", W/2, 595);
-    ctx.fillText("QUEST", W/2, 615);
+    ctx.font = "italic 15px Georgia"; ctx.fillStyle = GRAY;
+    ctx.textAlign = "left";
+    ctx.fillText("📜 Certified by Aristotle, Garden Guide", 90, 762);
+    ctx.textAlign = "right";
+    ctx.fillText(`Awarded on ${dateStr}`, W-90, 762);
+    ctx.textAlign = "center";
   }, [user, language]);
 
   function download() {
@@ -2362,6 +2705,11 @@ export default function App() {
   const [activeModule,     setActiveModule]     = useState(null);
   const [lastScore,        setLastScore]        = useState(null);
 
+  const [loadingDone, setLoadingDone] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [destination, setDestination] = useState(null);
+  const initialAuthCheckedRef = useRef(false);
+
   const moduleQuestions = useMemo(()=>
     activeModule ? QUESTIONS.filter(q=>q.module===activeModule.id) : [],
   [activeModule]);
@@ -2383,6 +2731,42 @@ export default function App() {
     setScreen("language");
   }
 
+  // Auto-resume a signed-in session (e.g. reopening the app on the same device)
+  // without jumping straight past the loading splash — the screen switch waits
+  // for whichever of {loading animation, auth check} finishes last.
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      if (initialAuthCheckedRef.current) return;
+      initialAuthCheckedRef.current = true;
+      if (fbUser) {
+        const record = await fetchUserRecord(fbUser.uid).catch(()=>null);
+        const username = record?.username || (fbUser.email||"").split("@")[0];
+        const fullName = record?.fullName || fbUser.displayName || username;
+        const progress = record?.progress || null;
+        setUser({ uid: fbUser.uid, username, fullName });
+        const lang = progress && LANGUAGES.find(l=>l.id===progress.languageId);
+        const char = progress && CHARACTERS.find(c=>c.id===progress.characterId);
+        if (progress?.completedModules != null && lang && char) {
+          setLanguage(lang);
+          setCharacter(char);
+          setCompletedModules(progress.completedModules);
+          setPrevCompleted(progress.completedModules);
+          setDestination("map");
+        } else {
+          setDestination("language");
+        }
+      } else {
+        setDestination("auth");
+      }
+      setAuthChecked(true);
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (loadingDone && authChecked && destination) setScreen(destination);
+  }, [loadingDone, authChecked, destination]);
+
   function handleFinish(score) { setLastScore(score); setScreen("results"); }
 
   function handleContinue() {
@@ -2396,7 +2780,7 @@ export default function App() {
     setCompletedModules(newCompleted);
 
     if (user) {
-      saveProgress(user.username, {
+      saveProgress(user.uid, {
         languageId: language.id,
         characterId: character.id,
         completedModules: newCompleted,
@@ -2409,7 +2793,7 @@ export default function App() {
     setPrevCompleted(0);
     setCompletedModules(0);
     if (user) {
-      saveProgress(user.username, {
+      saveProgress(user.uid, {
         languageId: language.id,
         characterId: character.id,
         completedModules: 0,
@@ -2418,11 +2802,23 @@ export default function App() {
     setScreen("map");
   }
 
+  async function handleLogout() {
+    await logoutUser().catch(()=>{});
+    setUser(null);
+    setLanguage(null);
+    setCharacter(null);
+    setCompletedModules(0);
+    setPrevCompleted(0);
+    setActiveModule(null);
+    setLastScore(null);
+    setScreen("auth");
+  }
+
   return (
     <>
       <GlobalStyles/>
       {screen==="loading"&&(
-        <LoadingScreen onDone={()=>setScreen("auth")}/>
+        <LoadingScreen onDone={()=>setLoadingDone(true)}/>
       )}
       {screen==="auth"&&(
         <AuthScreen onAuth={handleAuth}/>
@@ -2441,7 +2837,8 @@ export default function App() {
           onStartModule={mod=>{ setActiveModule(mod); setScreen("intro"); }}
           onBack={()=>setScreen("character")}
           onViewCertificate={()=>setScreen("certificate")}
-          onPlayAgain={handlePlayAgain}/>
+          onPlayAgain={handlePlayAgain}
+          onLogout={handleLogout}/>
       )}
       {screen==="intro"&&activeModule&&(
         <AristotleIntro module={activeModule}
